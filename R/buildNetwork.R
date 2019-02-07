@@ -171,7 +171,7 @@ pathway.relabel<-function(genes,data.ref,go){
 #' @param mutation_effects Supply a list of mutations, with a column "gene" and "functionalEffect" to include mutation effects in the visualization. This is not necessary for the majority of functionality, therefore this function will run if it is not supplied.
 #' @import magrittr dplyr data.table mygene discover
 #' @export
-buildApplicationFile<-function(mtdt, path_to_file, q.threshold = 0.01, mutation_effects = NULL, res.combined = NULL){
+buildAppFile<-function(mtdt, path_to_file, q.threshold = 0.01, mutation_effects = NULL, res.combined = NULL){
 
   if(!grepl(path_to_file,pattern = ".rds$")){
     path_to_file<-paste(path_to_file,".rds", sep = "")
@@ -226,11 +226,11 @@ buildApplicationFile<-function(mtdt, path_to_file, q.threshold = 0.01, mutation_
   # Take all elements and combine them into a single RDS file
 
   if(!exists("effct")){
-    main    <- list(dictionary,edges,events,data.ref)
+    main    <- list(dictionary,res.combined,events,data.ref)
     names(main) <- c("dict","edges","events","nodes")
 
   }else{
-    main    <- list(dictionary,edges,events,data.ref)
+    main    <- list(dictionary,res.combined,events,data.ref)
     names(main) <- c("dict","edges","events","nodes")
   }
   print(path_to_file)

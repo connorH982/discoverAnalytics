@@ -112,7 +112,7 @@ pathway.relabel<-function(genes,data.ref){
 ui <- fluidPage(
   
   # Application title
-  titlePanel("Discover Interactive Analytics"),
+  titlePanel("driverAnalytics: for mutual exclusivity and co-occurrence results"),
   # UPPER SEARCH BAR ROW:
   # Define search options: Coloring (based on go terms), And filtering options
   # uiOutput(search.bar) is the search bar, but it is a reactive ui element and so its code is mostly in the "server" chunk
@@ -235,7 +235,7 @@ server <- function(input, output) {
      The <a href='https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1114-x'>DISCOVER test (Discrete Independence Statistic Controlling for Observations with Varying Event Rates)</a> 
      is one of several methods in use to identify potential driver mutations in cancer. 
      <br><br>
-     To use this application you can either use the presupplied sample data or upload your own results. To do use the buildAppFile function from the <a href ='https://github.com'>driverAnalytics package.</a>
+     To use this application you can either use the presupplied sample data or upload your own results. To do use the buildAppFile function from the <a href ='https://github.com/connorH982/discoverAnalytics'>driverAnalytics package.</a>
      <br><br>
      <b>Sample Data</b>
      <br><br>
