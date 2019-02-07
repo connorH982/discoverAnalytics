@@ -1,0 +1,738 @@
+library(shiny)
+library(data.tree)
+library(magrittr)
+library(tidyr)
+library(DT)
+library(visNetwork)
+library(data.table)
+library(intergraph)
+library(data.table)
+library(dplyr)
+library(igraph)
+library(ggplot2)
+options(shiny.maxRequestSize = 30*1024^2)
+
+# Collection of small support functions for working with the files used by the app
+sumGoConnections<-function(res.sub,dict,effect = "Unknown", type = "BP"){
+  gene.list <- res.sub %>% dplyr::select(gene1,gene2) %>% split(seq(nrow(res.sub))) %>% lapply(unlist)
+  all.go    <- names(dict[[tolower(type)]])
+  bp.assoc <-lapply(gene.list, FUN = function(genes){
+    go1<-dict[["gene"]][[genes[["gene1"]]]][[type]]
+    go2<-dict[["gene"]][[genes[["gene2"]]]][[type]]
+    go.list<-list(go1,go2) %>% unlist %>% unique
+    ind <- as.data.table(all.go %in% go.list) %>% t
+    names(ind)<-all.go
+    as.data.table(ind)
+  }) %>% rbindlist
+  names(bp.assoc)<-all.go
+  bp.have        <-bp.assoc[,colSums(bp.assoc)!=0, with = FALSE] %>% t %>% as.data.table(keep.rownames = T)
+  bp.have$rn %<>% as.factor
+  bp.counts <- bp.have[,.(counts = (sum(rowSums(.SD)))-nrow(.SD)), by = "rn"] %>% .[order(-counts)]
+  bp.counts[,Effect := effect]
+}
+
+search.for.go.by.gene<-function(gene,go,dict){
+  dict[["gene"]][gene] %>% lapply(FUN = `[[`, go) %>%
+    unlist(use.names = FALSE) %>% unique
+}
+
+search.for.gene.by.go<-function(type,go,dict){
+  dict[[type]][go] %>%
+    unlist(use.names = FALSE) %>% unique
+}
+
+collapse.edge.ids<-function(edgelist){
+  # Collapses an edgelist to a vector of edge ids
+  edgelist %>% dplyr::select(1,2) %>% dplyr::combine() %>% unique
+}
+
+subsetEdgelist<-function(what,edgelist,term="and"){
+  # Subsets an edgelist while by preserving neighbors
+  if(term=="and"){
+    edgelist[(edgelist[[1]] %in% what) & (edgelist[[2]] %in% what)]
+  }else if(term=="or"){
+    edgelist[(edgelist[[1]] %in% what) | (edgelist[[2]] %in% what)]
+  }
+  
+}
+new.edge.search<-function(search.by="gene",
+                          full.edgelist,
+                          fil,
+                          degreeType,
+                          selected,
+                          dict){
+  
+  ## If a filter is applied, subset the edgelist
+  if(fil=="MutEx"){
+    res.sub<-full.edgelist %>% subset(Effect=="red")
+  }else if(fil=="CoOccurrence"){
+    res.sub<-full.edgelist %>% subset(Effect=="green")
+  }else{
+    res.sub<-full.edgelist
+  }
+  
+  ## Get gene list
+  if(search.by=="gene"){
+    genes<-selected
+  }else{
+    genes<-search.for.gene.by.go(type = search.by,
+                                 go = selected,
+                                 dict = dict)
+    
+  }
+  
+  ## Now consider the degree of the search
+  if(degreeType=="Only"){
+    res.sub<-subsetEdgelist(genes,res.sub,term = "and")
+  }else if(degreeType=="First Degree"){
+    res.sub<-subsetEdgelist(genes,res.sub,term = "or")
+  }else if(degreeType=="Second Degree"){
+    degree.ids<-subsetEdgelist(genes,res.sub,term = "or") %>% collapse.edge.ids
+    res.sub<-subsetEdgelist(degree.ids,res.sub,term = "or")
+  }else{
+    res.sub
+  }
+  
+}
+
+
+
+pathway.relabel<-function(genes,data.ref){
+  a<-lapply(genes,FUN=function(g){
+    a<-data.ref[label==g] %>% dplyr::select(title)
+  }) %>% unlist
+}
+
+
+
+#####################################################################################################################################
+# Shiny UI Code Chunk
+#####################################################################################################################################
+#####################################################################################################################################
+ui <- fluidPage(
+  
+  # Application title
+  titlePanel("Discover Interactive Analytics"),
+  # UPPER SEARCH BAR ROW:
+  # Define search options: Coloring (based on go terms), And filtering options
+  # uiOutput(search.bar) is the search bar, but it is a reactive ui element and so its code is mostly in the "server" chunk
+  fluidRow(
+    column(3,uiOutput("search.bar")),
+    column(3,offset = 1,selectInput("coloring", label = tags$u("Color By"), 
+                                    choices = list("Biological Function" = "BF","Cellular Component" = "CC", "Molecular Function" = "MF"), selected = "BF")),
+    column(3,offset = 2,checkboxInput("onlyConnected","Only show genes with significant pairs",value = TRUE))
+  ),
+  # LOWER SEARCH BAR ROW:
+  # Define search options: search type (gene or a go term), degree of connections, and type of connections
+  fluidRow(
+    column(3,radioButtons("searchType", label = tags$u("Search Type"),
+                          choices = list("Gene" = "gene", "Biological Function" = "BF","Cellular Component" = "CC", "Molecular Function" = "MF"), 
+                          selected = "gene",inline = FALSE)),
+    
+    column(3,offset = 1,radioButtons("selectType", label = tags$u("Selection Type"),
+                                     choices = list("Only Searched For" = "Only", "First Degree Connections" = "First Degree", "Second Degree Connections" = "Second Degree","All" = "All"), 
+                                     selected = "All",inline = FALSE)),
+    column(3,offset = 2,radioButtons("filter", label = tags$u("Filter"),
+                                     choices = list("CoOccurrence" = "CoOccurrence", "MutEx" = "MutEx","Keep Both" = "All"), 
+                                     selected = "All",inline = FALSE))
+  ),
+  # UPLOAD ROW
+  # Allows for some simple options to download the currently on-screen network
+  fluidRow(
+    column(2,selectInput(inputId = "directory",label = "Select Network",choices = list.dirs(path = "Networks",recursive = FALSE,full.names = FALSE))),
+    column(3,fileInput(inputId = "main",label = "Upload Results",accept = ".rds",placeholder = "Data prepared with buildAppFile()")),
+    #column(3,textInput(inputId = "filename",label = "Filename:")),
+    #column(3,downloadButton("downloadData",label = "Download Subnetwork")),
+    column(4,shiny::radioButtons(inputId = "uploadPick",label = "Dataset Choice",choices = c("Sample Data","Uploaded Data"),selected = "Sample Data",inline = TRUE)),
+    tags$style(type='text/css', "#downloadData { width:60%; margin-top: 25px;}"),style = "background-color:#d1d1e0;"
+  ),
+  # MAIN PLOT: INTERACTIVE NETWORK
+  # Almost the entirity of this code is in the server chunk, but this is the ui element
+  visNetworkOutput("netPlot"),
+  # DESCRIPTION of the application goes here:
+  uiOutput("description"),
+  # LOWER TABS
+  # Offer additional analysis and visualization
+  tabsetPanel(
+    # TAB 1 (FAR LEFT): Summarizes mutual/co-occurence mutation connections by gene
+    tabPanel(  tags$div(class="header", checked=NA,
+                        tags$b("Gene Summary")),
+               radioButtons("geneDisplay",label = "Display:",choices = list("Connections" = "connect", "Functional Effects" = "effect"),inline = TRUE),
+               plotOutput("genePlot"),
+               DTOutput("geneSummary")
+    ),
+    # TAB 2 (LEFT): Biological Process
+    tabPanel(  tags$div(class="header", checked=NA,
+                        tags$b("Biological Process Summary")),
+               radioButtons("bioDisplay",label = "Display:",choices = list("Connections" = "connect", "Functional Effects" = "effect"),inline = TRUE),
+               plotOutput("bioPlot"),
+               DTOutput("bioSummary")),
+    # TAB 3 (MIDDLE): Cellular Components 
+    tabPanel(  tags$div(class="header", checked=NA,
+                        tags$b("Cellular Component Summary")),
+               radioButtons("CCDisplay",label = "Display:",choices = list("Connections" = "connect", "Functional Effects" = "effect"),inline = TRUE),
+               plotOutput("CCPlot"),
+               DTOutput("CCSummary")),
+    # TAB 4 (RIGHT): Molecular Function
+    tabPanel(  tags$div(class="header", checked=NA,
+                        tags$b("Molecular Function Summary")),
+               radioButtons("MFDisplay",label = "Display:",choices = list("Connections" = "connect", "Functional Effects" = "effect"),inline = TRUE),
+               plotOutput("MFPlot"),
+               DTOutput("MFSummary")),
+    # TAB 5 (FAR RIGHT): Network summary
+    tabPanel( tags$div(class="header", checked=NA,
+                       tags$b("Network Summary")),
+              #DTOutput("summary"),
+              DTOutput("group.summary"),
+              fluidRow(
+                column(2,actionButton("runTest",label = "Run Test")),
+                column(3,radioButtons("testType", label = tags$u("Group Test Type"),
+                                      choices = list("Coverage" = "coverage", "Exclusivity" = "exclusivity","Impurity"="impurity"), 
+                                      selected = "Coverage",inline = TRUE)),
+                column(4,textOutput("group.test.output"))),
+             # tags$b("Showing up to 20 genes in selection"),
+              plotOutput("discoverPlots")
+    )
+    
+    
+  ),
+  # Additional option to view the file structure of the application (generally not meant for most users to use, though helpful to see for inserting your own data)
+  checkboxInput("showfiles",label = "Technical: Display filepath information",value = FALSE),
+  conditionalPanel(condition = "input.showfiles == true",
+                   verbatimTextOutput("dir")),
+  conditionalPanel(condition = "input.showfiles == true",
+                   tabsetPanel(
+                     tabPanel(tags$div(class="header", checked=NA,
+                                       tags$b("Edges")),
+                              DTOutput("edgeData")),
+                     tabPanel(tags$div(class="header", checked=NA,
+                                       tags$b("Nodes")),
+                              DTOutput("nodeData")),
+                     tabPanel(tags$div(class="header", checked=NA,
+                                       tags$b("Events: Indicator Matrix")),
+                              DTOutput("eventDataInd")),
+                     tabPanel(tags$div(class="header", checked=NA,
+                                       tags$b("Events: Probabilities")),
+                              DTOutput("eventDataPrb")),
+                     tabPanel(tags$div(class="header", checked=NA,
+                                       tags$b("Effects")),
+                              DTOutput("effectsDT"))
+                   ))
+  
+)
+#####################################################################################################################################
+#####################################################################################################################################
+# END UI 
+
+#####################################################################################################################################
+# Shiny SERVER Code Chunk
+#####################################################################################################################################
+#####################################################################################################################################
+server <- function(input, output) {
+  ###########################################
+  output$description<-renderUI({
+    HTML("
+     The <a href='https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1114-x'>DISCOVER test (Discrete Independence Statistic Controlling for Observations with Varying Event Rates)</a> 
+     is one of several methods in use to identify potential driver mutations in cancer. 
+     <br><br>
+     To use this application you can either use the presupplied sample data or upload your own results. To do use the buildAppFile function from the <a href ='https://github.com'>driverAnalytics package.</a>
+     <br><br>
+     <b>Sample Data</b>
+     <br><br>
+     Above you see the results of running the DISCOVER mutual exclusivity analysis on mutation data in the <a href='http://cbioportal.org/study?id=lung_msk_2017#summary'>MSK-IMPACT study</a>.
+     Red connections indicate mutations tend to occur in only one of the two genes in a given tumor, but not both (mutually exclusive).
+     Green connections indicate two genes tend to be found mutated together.
+     You can use the search options to adjust the genes currently in display and the lower tabs to analyze patterns amongst those genes. 
+     To search for a specific gene, change selection type to only, first degree or second degree.
+     <br><br>
+     The criteria for being considered either mutually exclusive or co-occurring was left to the default of the DISCOVER package, that of q threshold of 0.01. 
+     Additionally you can change the search type to searching by a gene ontology term.
+     <br> <br> <br>
+     ")
+  })
+  
+  
+  # REACTIVE VARIABLES: These variables define the currently selected network.
+  # For instance, if you select "Network A" from the dropdown menu, then these variables are read in from that network's directory.
+  # Since they need to be updated to reflect the currently selected network they are reactive.
+  ## Variables:
+  # data.ref:     Contains a list of all genes in the network, along with information for fill colors in the network
+  # f.effects:    List of functional effects in the gene, optional
+  # res.combined: Edge list for the network
+  # events:       This is a variable used and created by the DISCOVER package.
+  #                     -- One is an indicator matrix, showing which genes are mutated in which tumors.
+  #                     -- Second is a matrix of background mutation rate estimaties.
+  # dict:         Dictionary used for findings genes and go terms, supports searches in both directions for speed.
+  #############################################
+  main    <- reactive({
+    if(input$uploadPick == "Sample Data"){
+      main <- readRDS(paste("Networks/",input$directory,"/main.rds",sep = ""))
+    }else{
+      main<-readRDS(input$main$datapath)
+    }
+    
+  })
+  
+  data.ref<-reactive({
+    data.ref <- main()$nodes %>% as.data.table
+    #data.ref<-readRDS(paste("Networks/",input$directory,"/nodes",sep = "")) %>% as.data.table
+  })
+  f.effects<-reactive({
+    f.effects <- main()$effects %>% as.data.table
+    #f.effects<-readRDS(paste("Networks/",input$directory,"/effects",sep = "")) %>% as.data.table
+    go.labels <-data.ref() %>% dplyr::select(gene,BF,CC,MF)
+    merge(f.effects,go.labels)
+  })
+  res.combined<-reactive({
+    res.combined <- main()$edges %>% as.data.table
+    #readRDS(paste("Networks/",input$directory,"/edges",sep = "")) %>% as.data.table
+  })
+  
+  events<-reactive(({
+    events<-main()$events
+    #readRDS(paste("Networks/",input$directory,"/events",sep = ""))
+  }))
+  
+  dict<-reactive(({
+    dict<-main()$dict
+    #readRDS(paste("Networks/",input$directory,"/dict",sep = ""))
+  }))
+  #############################################
+  
+  
+  
+  
+  
+  # SEARCH BAR: Reactive UI Element
+  output$search.bar<-renderUI({
+    #search.terms<-data.ref() %>% dplyr::select(input$searchType) %>% unique
+    search.by<-ifelse(input$searchType=="BF",
+                      yes = "bp",
+                      no = tolower(input$searchType))
+    search.terms<-dict()[[search.by]] %>% names
+    selectizeInput(inputId = "gene",choices = search.terms,label = "Search",multiple=TRUE,select=search.terms[1])
+  })
+  
+  # Second set of reactive variables:
+  # The next set of reactive variables are meant to update the network with the information searched for.
+  # i.e. which genes are now selected, the connections/edges between the selected genes etc.
+  ########################################################################################################################
+  res.sub<-reactive({
+    search.by<-ifelse(input$searchType=="BF",
+                      yes = "bp",
+                      no = tolower(input$searchType))
+    
+    res.sub<-new.edge.search(search.by          = search.by,
+                             full.edgelist      = res.combined(),
+                             dict               = dict(),
+                             fil                = input$filter,
+                             degreeType         = input$selectType,
+                             selected           = input$gene)
+    
+    res.sub
+  })
+  
+  verts<-reactive({
+    
+    if(input$selectType=="All"){
+      searched.verts<-dict()[["gene"]] %>% names
+    }else{
+      if(input$searchType!="gene"){
+        search.by<-ifelse(input$searchType=="BF",
+                          yes = "bp",
+                          no = tolower(input$searchType))
+        
+        searched.verts<-search.for.gene.by.go(type = search.by,
+                                              go = input$gene,
+                                              dict = dict())
+      }else{
+        searched.verts<-input$gene
+      }
+      
+    }
+    
+    if(input$onlyConnected==TRUE){
+      searched.verts<-NULL
+    }
+    
+    
+    
+    edge.verts<-res.sub() %>% collapse.edge.ids
+    search.list<- union(searched.verts,edge.verts)
+    verts<- data.ref()[gene %in% search.list]
+    
+    
+  })
+  
+  data <- reactive({
+    validate(
+      need(nrow(verts())!=0,"No network data avaiable.")
+    )
+    get(input$gene)
+  })
+  data.effects <- reactive({
+    validate(
+      need(length(f.effects())!=0,"No effects data avaiable.")
+    )
+    get(input$bioDisplay)
+  })
+  ########################################################################################################################
+  
+  # Interactive network code
+  # The main plot of the application's code is here.
+  # It takes above verts() for nodes and res.sub() for edges as input and draws the network
+  output$netPlot <- renderVisNetwork({
+    enablePhys<-ifelse(input$selectType=="All" & input$filter=="All" & (nrow(verts())>200),FALSE,TRUE)
+    verts <- verts() %>% dplyr::rename(id=gene) %>% mutate(label=id) %>% mutate(group=get(input$coloring)) %>%
+      mutate(title=paste(paste("Biological Process:",BF),
+                         paste("Molecular Function:",MF),
+                         paste("Cellular Function:",CC),sep = "<br>"))
+    
+    weight<-res.sub()$odds.ratio %>% as.numeric
+    edges<-res.sub() %>% dplyr::rename(from=gene1,to=gene2,color=Effect) %>% dplyr::select(from,to,color) %>% 
+      mutate(value=weight) %>% as.data.frame 
+    
+    
+    net<-visNetwork(verts,edges) %>% visPhysics(enabled = TRUE) %>% 
+      visEdges(smooth = list(enabled=TRUE,roundness=1),scaling = list(min=0.25,max=4))
+    net
+  })
+  
+  # DISCOVER: groupwise test 
+  ########################################################################################################################
+  # This is for manually running a groupwise test, this set of code ensures it reacts to the action of hitting "run test"
+  group.test<-eventReactive(input$runTest,{
+    NULL
+    #capture.output({
+    #  discover::groupwise.discover.test(events()[verts()$gene,],method = input$testType)
+    #})
+  })
+  
+  # Captures the above output and prints the output for the user
+  output$group.test.output<-renderText({
+    if(!is.null(group.test())){
+      print(group.test())
+    }else{
+      print("Group tests disabled: The discover package is not hosted on CRAN or github, and therefore we cannot use discover functions here.")
+    }
+  })
+  ########################################################################################################################
+  
+  output$group.summary<-renderDT({
+    verts<-verts()
+    res.sub<-res.sub()
+    res.sub$Effect<-as.factor(res.sub$Effect)
+    rank.table<-res.sub %>% summarise(
+      gene.count=nrow(verts),
+      connected.gene.count=append(res.sub$gene1,res.sub$gene2) %>% unique %>% length,
+      n.mut.exclusive=sum(Effect=="red"),
+      n.cooccurence=sum(Effect=="green"),
+      n.connections=length(Effect)
+    )
+    
+    full.nodes<-data.ref()
+    full.edgelist<-res.combined()
+    full.edgelist$Effect<-as.factor(full.edgelist$Effect)
+    rank.table.full<-full.edgelist %>% summarise(
+      gene.count=nrow(full.nodes),
+      connected.gene.count=append(full.edgelist$gene1,full.edgelist$gene2) %>% unique %>% length,
+      n.mut.exclusive=sum(Effect=="red"),
+      n.cooccurence=sum(Effect=="green"),
+      n.connections=length(Effect)
+    )
+    
+    a<-rbind(rank.table,rank.table.full)
+    rownames(a)<-c("Across Subset","Across All Genes Tested")
+    a
+  })
+  
+  
+  ##################################################################################################################################################
+  ## Gene Summary Tab
+  # Summary across all genes
+  gene.summary <- reactive({
+    
+    verts<-verts()
+    res.sub<-res.sub()
+    dat<-melt(res.sub,measure.vars = c("gene1","gene2")) %>% merge(verts,by.x="value",by.y="gene") %>% dplyr::rename(gene=value)
+    
+    #genes.in.group<-dat %>% subset(!duplicated(gene)) %>% group_by(gene)%>%summarize(gene.count=length(Effect)) %>% as.data.table
+    rank.table<-dat %>% group_by(gene) %>% summarize(count.connections=length(Effect),count.mutex=sum(Effect=="red"),count.cooccurrence=sum(Effect=="green")) %>% as.data.table
+    
+    rank.table %<>% 
+      arrange(desc(count.connections))
+    
+    
+  })
+  
+  output$genePlot<-renderPlot({
+    if(input$geneDisplay=="connect"){
+      rank.table <- gene.summary() %>% melt(measure.vars=c("count.mutex","count.cooccurrence"),value.name="connections",variable.name="Effect")
+      
+      ggplot(rank.table,aes(x=reorder(gene,-connections),y=connections,fill=Effect))+geom_bar(stat = "identity")+scale_fill_manual(values=c("red","seagreen"))+
+        theme(axis.text.x = element_blank(),axis.ticks = element_blank())+xlab("Genes")+guides(fill=FALSE)+ylab(label = element_blank())
+    }else{
+      f.effects        <- f.effects() %>% subset(gene %in% verts()$gene)
+      f.effects[is.na(f.effects)] <- "Copy Number"
+      f.effects <- f.effects %>% group_by(gene,functionalEffect) %>% summarize(count=n())
+      ggplot(f.effects,aes(x=reorder(gene,-count),y=count,fill=functionalEffect))+geom_bar(stat="identity")+xlab("Genes")+ylab("Total Mutations")+
+        theme(axis.text.x = element_text(angle = 45, colour = "grey29",hjust = 1,face = "bold"),axis.ticks = element_blank())
+    }
+    
+  })
+  
+  
+  output$geneSummary<-renderDT({
+    if(input$geneDisplay=="effect"){
+      f.effects        <- f.effects() %>% subset(gene %in% verts()$gene)
+      f.effects[is.na(f.effects)] <- "Copy Number"
+      f.effects %>% group_by(gene) %>% summarize(count=n(),
+                                                 percent = scales::percent(n()/nrow(f.effects))) %>% 
+        arrange(desc(count))
+    }else{
+      gene.summary()
+    }
+    
+  })
+  
+  
+  ###################################################################################################################################################################
+  
+  ###################################################################################################################################################################
+  ## Biological Functions Tab
+  counts.bp <- reactive({
+    res.sub<-res.sub()
+    dict   <-dict()
+    counts.by.effect <- list(sumGoConnections(res.sub[Effect == "red"],dict = dict,  effect = "Mutex", type = "BP"),
+                             sumGoConnections(res.sub[Effect == "green"],dict = dict,effect = "CoOccurrence", type = "BP")) %>% rbindlist
+    order.counts <- counts.by.effect[,.(counts = sum(counts)), by = "rn"]
+    counts.by.effect$rn     %<>% factor(.,levels = order.counts$rn)
+    counts.by.effect %<>% dplyr::rename(go = rn)
+    counts.by.effect$Effect %<>% as.factor
+    
+    counts.by.effect
+    
+  })
+  bio.summary<-reactive({
+    if(input$bioDisplay=="connect"){
+      bio.summary <- spread(data = counts.bp(),key = "Effect",value = "counts",fill = 0)
+      suppressWarnings(bio.summary[,total := (CoOccurrence+Mutex)])
+      bio.summary %<>% arrange(desc(total)) %>% as.data.table
+      
+      bio.summary
+      
+    }else{
+      f.effects        <- f.effects() %>% subset(gene %in% verts()$gene)
+      f.effects[is.na(f.effects)] <- "Copy Number"
+      f.effects <- f.effects %>% group_by(BF,functionalEffect) %>% summarize(count=n())
+    }
+  })
+  
+  output$bioPlot<-renderPlot({
+    if(input$bioDisplay=="connect"){
+      ggplot(counts.bp(),aes(x = go, y = counts, fill = Effect))+geom_bar(stat = "identity") +
+        scale_fill_manual(values = c("seagreen","red"))+theme(axis.text.x = element_blank(),axis.ticks.x = element_blank())+xlab("Biological Process")+ylab("Counts of occurrence in gene pair")
+      
+    }else{
+      f.effects<-bio.summary()
+      ggplot(f.effects,aes(x=reorder(BF,-count),y=count,fill=functionalEffect))+geom_bar(stat="identity")+xlab("Biological Functions")+ylab("Total Mutations")+
+        theme(axis.text.x = element_blank(),axis.ticks = element_blank())
+    }
+    
+  })
+  
+  
+  
+  output$bioSummary<-renderDT({
+    if(input$bioDisplay=="effect"){
+      bio.summary() %>% group_by(BF) %>% summarize(count=sum(count),
+                                                   percent = scales::percent(sum(count)/(sum(bio.summary()$count)))) %>% 
+        dplyr::rename("Biological Function"=BF) %>% arrange(desc(count))
+    }else{
+      bio.summary()
+    }
+    
+  })
+  
+  ##########################################################################################################################################################
+  
+  ###################################################################################################################################################################
+  ## Cellular Component Tab
+  counts.cc <- reactive({
+    res.sub<-res.sub()
+    dict   <-dict()
+    counts.by.effect <- list(sumGoConnections(res.sub[Effect == "red"],dict = dict,  effect = "Mutex", type = "CC"),
+                             sumGoConnections(res.sub[Effect == "green"],dict = dict,effect = "CoOccurrence", type = "CC")) %>% rbindlist
+    order.counts <- counts.by.effect[,.(counts = sum(counts)), by = "rn"]
+    counts.by.effect$rn     %<>% factor(.,levels = order.counts$rn)
+    counts.by.effect %<>% rename(go = rn)
+    counts.by.effect$Effect %<>% as.factor
+    
+    counts.by.effect
+    
+  })
+  
+  CC.summary<-reactive({
+    if(input$CCDisplay=="connect"){
+      cc.summary <- spread(data = counts.cc(),key = "Effect",value = "counts",fill = 0)
+      suppressWarnings(cc.summary[,total := (CoOccurrence+Mutex)])
+      cc.summary %<>% arrange(desc(total)) %>% as.data.table
+      
+      cc.summary
+    }else{
+      f.effects        <- f.effects() %>% subset(gene %in% verts()$gene)
+      f.effects[is.na(f.effects)] <- "Copy Number"
+      f.effects <- f.effects %>% group_by(CC,functionalEffect) %>% summarize(count=n())
+    }
+  })
+  
+  output$CCPlot<-renderPlot({
+    if(input$CCDisplay=="connect"){
+      ggplot(counts.cc(),aes(x = go, y = counts, fill = Effect))+geom_bar(stat = "identity") +
+        scale_fill_manual(values = c("seagreen","red"))+theme(axis.text.x = element_blank(),axis.ticks.x = element_blank())+xlab("Cellular Component")+ylab("Counts of occurrence in gene pair")
+    }else{
+      f.effects<-CC.summary()
+      ggplot(f.effects,aes(x=reorder(CC,-count),y=count,fill=functionalEffect))+geom_bar(stat="identity")+xlab("Cellular Component")+ylab("Total Mutations")+
+        theme(axis.text.x = element_blank(),axis.ticks = element_blank())
+    }
+    
+  })
+  
+  
+  
+  output$CCSummary<-renderDT({
+    if(input$CCDisplay=="effect"){
+      CC.summary() %>% group_by(CC) %>% summarize(count=sum(count),
+                                                  percent = scales::percent(sum(count)/(sum(CC.summary()$count)))) %>% 
+        dplyr::rename("Cellular Component"=CC) %>% arrange(desc(count))
+    }else{
+      CC.summary()
+    }
+    
+  })
+  ##########################################################################################################################################################
+  
+  
+  ##########################################################################################################################################################
+  ###################################################################################################################################################################
+  ## Molecular Function Tab
+  counts.mf <- reactive({
+    res.sub<-res.sub()
+    dict   <-dict()
+    counts.by.effect <- list(sumGoConnections(res.sub[Effect == "red"],dict = dict,  effect = "Mutex", type = "MF"),
+                             sumGoConnections(res.sub[Effect == "green"],dict = dict,effect = "CoOccurrence", type = "MF")) %>% rbindlist
+    order.counts <- counts.by.effect[,.(counts = sum(counts)), by = "rn"]
+    counts.by.effect$rn     %<>% factor(.,levels = order.counts$rn)
+    counts.by.effect %<>% rename(go = rn)
+    counts.by.effect$Effect %<>% as.factor
+    
+    counts.by.effect
+    
+  })
+  
+  MF.summary<-reactive({
+    if(input$MFDisplay=="connect"){
+      mf.summary <- spread(data = counts.mf(),key = "Effect",value = "counts",fill = 0)
+      suppressWarnings(mf.summary[,total := (CoOccurrence+Mutex)])
+      mf.summary %<>% arrange(desc(total)) %>% as.data.table
+      
+      mf.summary
+    }else{
+      f.effects        <- f.effects() %>% subset(gene %in% verts()$gene)
+      f.effects[is.na(f.effects)] <- "Copy Number"
+      f.effects <- f.effects %>% group_by(MF,functionalEffect) %>% summarize(count=n())
+    }
+  })
+  
+  output$MFPlot<-renderPlot({
+    if(input$MFDisplay=="connect"){
+      ggplot(counts.cc(),aes(x = go, y = counts, fill = Effect))+geom_bar(stat = "identity") +
+        scale_fill_manual(values = c("seagreen","red"))+theme(axis.text.x = element_blank(),axis.ticks.x = element_blank())+xlab("Cellular Component")+ylab("Counts of occurrence in gene pair")
+    }else{
+      f.effects<-MF.summary()
+      ggplot(f.effects,aes(x=reorder(MF,-count),y=count,fill=functionalEffect))+geom_bar(stat="identity")+xlab("Molecular Function")+ylab("Total Mutations")+
+        theme(axis.text.x = element_blank(),axis.ticks = element_blank())
+    }
+    
+  })
+  
+  
+  
+  output$MFSummary<-renderDT({
+    if(input$MFDisplay=="effect"){
+      MF.summary() %>% group_by(MF) %>% summarize(count=sum(count),
+                                                  percent = scales::percent(sum(count)/(sum(MF.summary()$count)))) %>% 
+        dplyr::rename("Molecular Function"=MF) %>% arrange(desc(count))
+    }else{
+      MF.summary()
+    }
+    
+  })
+  ##########################################################################################################################################################
+  
+  
+  output$summary<-renderDT({
+    if(nrow(res.sub())>0){
+      verts<-res.sub() %>% dplyr::select(gene1,gene2) %>% dplyr::combine() %>% unique %>% as.data.table %>% dplyr::rename(id=".") %>% mutate(label=id)
+      edges<-res.sub() %>% dplyr::rename(from=gene1,to=gene2,color=Effect) %>% dplyr::select(from,to,color) %>% as.data.frame 
+      res.graph<-asIgraph(res.sub())
+    }else{
+      verts<-input$gene%>% as.data.table %>% dplyr::rename(id=".") %>% mutate(label=id)
+      edges<-res.sub() %>% dplyr::rename(from=gene1,to=gene2,color=Effect) %>% dplyr::select(from,to,color) %>% as.data.frame
+      res.graph<-graph_from_data_frame(input$gene)
+    }
+    
+    
+    summary.data<-data.table(Degree.Centraltity=centr_degree(res.graph)$centralization,
+                             Betweenness=centr_betw(res.graph)$centralization,
+                             Closeness=centr_clo(res.graph)$centralization,
+                             Eigen=centr_eigen(res.graph)$centralization)
+    summary.data
+  })
+  
+  output$discoverPlots<-renderPlot({
+    verts<-verts()$gene
+    events<-events()$events
+    subset.genes<-rownames(events)[(rownames(events) %in% verts)]
+    
+    if(length(subset.genes)>20){
+      subset.genes<-rowSums(events) %>% .[order(.,decreasing = TRUE)] %>% names %>% .[1:20]
+    }
+    
+    if(length(subset.genes)>1){
+      NULL
+     # plot(events()[subset.genes,])
+    }else{
+      NULL
+    }
+    
+  })
+  
+  output$dir<-renderPrint({
+    dirs<-list.files(recursive = TRUE)
+    as.Node(data.frame(pathString=dirs))
+  })
+  output$edgeData<-renderDT({renderdata<-res.combined();renderdata$Effect %<>% as.factor;levels(renderdata$Effect)<-ifelse(levels(renderdata$Effect)=="red","Mutually Exclusive","Co-ocurrennce");renderdata})
+  output$nodeData<-renderDT({renderdata<-data.ref()})
+  output$eventDataInd<-renderDT({DT::datatable(events()$events[1:100,1:100],options=list(pageLength=100))})
+  output$eventDataPrb<-renderDT({DT::datatable(events()$bg[1:100,1:100],options=list(pageLength=100))})
+  output$effectsDT<-renderDT({DT::datatable(f.effects()[1:200,])})
+  
+  
+  output$downloadData <- downloadHandler(
+    filename = function() {
+      paste(input$filename, ".csv", sep = "")
+    },
+    content = function(file) {
+      download.data<-res.sub() %>% dplyr::select(gene1,gene2,p.value,q.value,effect)
+      fwrite(download.data,file = file)
+    }
+  )
+}
+#####################################################################################################################################
+#####################################################################################################################################
+# END SERVER 
+
+# Run the application 
+shinyApp(ui = ui, server = server)
+

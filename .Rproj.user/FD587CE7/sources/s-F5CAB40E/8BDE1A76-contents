@@ -1,0 +1,17 @@
+fold            <- "discoverAnalyticsDashboard/Networks/MSK Lung Cancer Less Conservative (q 0.05)"
+
+
+all.objs        <- lapply(list.files(fold),FUN = function(collect){
+  
+  readRDS(file = file.path(fold,collect))
+  
+})
+names(all.objs) <- list.files(fold)
+saveRDS(all.objs,"discoverAnalyticsDashboard/Networks/MSK Lung Cancer Less Conservative (q 0.05)/main.rds")
+
+
+library(discoverAnalytics)
+events<-readRDS("~/Genospace/Research/discoverAnalyticsV2/Networks/Lung Cancer No Copy Number/events")$events
+
+buildApplicationFile(mtdt = events,path_to_file = "~/Genospace/sc-lung-cancer-test.rds",q.threshold = 0.1,res.combined = res.combined)
+sc.main<-readRDS("~/Genospace/sc-lung-cancer-test.rds")

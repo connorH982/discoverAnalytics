@@ -1,0 +1,9 @@
+{
+    "path" : "~/Genospace/bioarchive/discoverAnalytics",
+    "sortOrder" : [
+        {
+            "ascending" : true,
+            "columnIndex" : 2
+        }
+    ]
+}

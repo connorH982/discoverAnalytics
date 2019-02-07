@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1549474660880.000,
+    "dirty" : true,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "5193AAF",
+    "lastKnownWriteTime" : 1549561479,
+    "last_content_update" : 1549563801016,
+    "path" : "~/Genospace/bioarchive/discoverAnalytics/R/buildNetwork.R",
+    "project_path" : "R/buildNetwork.R",
+    "properties" : {
+        "cursorPosition" : "244,0",
+        "scrollLine" : "225"
+    },
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

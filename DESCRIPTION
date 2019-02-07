@@ -1,0 +1,15 @@
+Package: discoverAnalytics
+Type: Package
+Title: Visualize and Analyze results from the DISCOVER test
+Version: 0.1.0
+Author: Connor Higgins
+Maintainer: The package maintainer <yourself@somewhere.net>
+Description: More about what it does (maybe more than one line)
+    Use four spaces when indenting paragraphs within the Description.
+License: What license is it under?
+Encoding: UTF-8
+LazyData: true
+Suggests: testthat, knitr
+Depends: magrittr, dplyr, tidyr, data.table, discover, mygene 
+VignetteBuilder: knitr
+RoxygenNote: 6.1.0.9000
